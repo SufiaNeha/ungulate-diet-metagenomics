@@ -1,2 +1,2 @@
 # ungulate-diet-metagenomics
-Bioinformatics and R analysis scripts for dietary overlap among three sympatric ungulates.
+This repository contains bioinformatics and R scripts used for metagenomic dietary analyses of sympatric ungulates. Reference genomes, sequencing data, sample-specific metadata, and configuration files are not included. Users must provide the required inputs and adjust file paths before running the scripts. The scripts are provided as a reconstructed workflow and have not yet been fully validated against the published results.
