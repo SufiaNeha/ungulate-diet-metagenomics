@@ -1,62 +1,163 @@
 source("scripts/00_setup.R")
 
+set.seed(345)
+
+dir.create(
+  "results/tables",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  "results/figures",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  "results/objects",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
 # ------------------------------------------------------------
 # 1. Load genus-level data
 # ------------------------------------------------------------
 
-ps_objects <- readRDS("results/phyloseq_objects.rds")
+ps_objects <- readRDS(
+  "results/phyloseq_objects.rds"
+)
 
 ps_genus <- ps_objects$genus
 
 counts <- get_mat(ps_genus)
 metadata <- get_meta(ps_genus)
 
-metadata <- metadata[
+if (!"SampleID" %in% names(metadata)) {
+  stop("Metadata must contain SampleID")
+}
+
+if (
+  anyNA(metadata$SampleID) ||
+  anyDuplicated(metadata$SampleID)
+) {
+  stop("Missing or duplicated sample IDs")
+}
+
+if (!setequal(
   rownames(counts),
+  metadata$SampleID
+)) {
+  stop("Count matrix and metadata do not match")
+}
+
+metadata <- metadata[
+  match(rownames(counts), metadata$SampleID),
   ,
   drop = FALSE
 ]
 
+rownames(metadata) <- metadata$SampleID
+
 stopifnot(
-  identical(rownames(counts), rownames(metadata))
+  identical(
+    rownames(counts),
+    rownames(metadata)
+  )
 )
 
-if (anyNA(metadata$Host) || anyNA(metadata$Season)) {
-  stop("Host and Season must be complete")
-}
+required_columns <- c(
+  "Host",
+  "Season",
+  "Age",
+  "Sex",
+  "Body_condition"
+)
 
-if (any(counts < 0) ||
-    any(!is.finite(counts))) {
-  stop("Invalid genus abundance values")
-}
+missing_columns <- setdiff(
+  required_columns,
+  names(metadata)
+)
 
-if (any(abs(counts - round(counts)) > 1e-8)) {
-  stop("Genus abundances must be integer counts")
-}
-
-if (any(rowSums(counts) == 0)) {
-  stop("Samples with zero genus-level reads detected")
+if (length(missing_columns) > 0) {
+  stop(
+    "Missing metadata columns: ",
+    paste(missing_columns, collapse = ", ")
+  )
 }
 
 metadata$Host <- factor(
   metadata$Host,
-  levels = host_levels
+  levels = c(
+    "Aoudad",
+    "Desert bighorn sheep",
+    "Mule deer"
+  )
 )
 
 metadata$Season <- factor(
   metadata$Season,
-  levels = season_levels
+  levels = c("Spring", "Winter")
 )
 
-metadata$Group <- interaction(
-  metadata$Host,
-  metadata$Season,
-  sep = " - ",
-  drop = TRUE
+metadata$Sex <- factor(metadata$Sex)
+
+if (
+  anyNA(metadata$Host) ||
+  anyNA(metadata$Season)
+) {
+  stop("Host and Season must be complete")
+}
+
+if (
+  any(!is.finite(counts)) ||
+  any(counts < 0) ||
+  any(abs(counts - round(counts)) > 1e-8)
+) {
+  stop("Invalid genus-level count values")
+}
+
+if (any(rowSums(counts) == 0)) {
+  stop("Zero-count samples detected")
+}
+
+# Six host-season groups, ordered by host.
+
+group_levels <- c(
+  "Aoudad - Spring",
+  "Aoudad - Winter",
+  "Desert bighorn sheep - Spring",
+  "Desert bighorn sheep - Winter",
+  "Mule deer - Spring",
+  "Mule deer - Winter"
+)
+
+metadata$Group <- factor(
+  paste(
+    metadata$Host,
+    metadata$Season,
+    sep = " - "
+  ),
+  levels = group_levels
+)
+
+if (anyNA(metadata$Group)) {
+  stop("Invalid host-season group")
+}
+
+# Colors shared across Figures 2 and 6.
+
+group_colors <- c(
+  "Aoudad - Spring" = "#F8766D",
+  "Aoudad - Winter" = "#C49A00",
+  "Desert bighorn sheep - Spring" = "#00BA38",
+  "Desert bighorn sheep - Winter" = "#00BFC4",
+  "Mule deer - Spring" = "#619CFF",
+  "Mule deer - Winter" = "#F564E3"
 )
 
 # ------------------------------------------------------------
-# 2. Rarefy to standardized sequencing depth
+# 2. Rarefy genus counts
 # ------------------------------------------------------------
 
 rarefaction_depth <- 20545L
@@ -65,9 +166,9 @@ sample_depths <- rowSums(counts)
 
 if (any(sample_depths < rarefaction_depth)) {
   stop(
-    "Some samples have fewer than ",
+    "One or more samples contain fewer than ",
     rarefaction_depth,
-    " genus-assigned reads. Check input curation."
+    " genus-assigned reads"
   )
 }
 
@@ -79,7 +180,10 @@ counts_rarefied <- vegan::rrarefy(
 )
 
 stopifnot(
-  all(rowSums(counts_rarefied) == rarefaction_depth)
+  all(
+    rowSums(counts_rarefied) ==
+      rarefaction_depth
+  )
 )
 
 ps_rarefied <- phyloseq::phyloseq(
@@ -90,12 +194,8 @@ ps_rarefied <- phyloseq::phyloseq(
   phyloseq::tax_table(
     phyloseq::tax_table(ps_genus)
   ),
-  phyloseq::sample_data(
-    metadata
-  )
+  phyloseq::sample_data(metadata)
 )
-
-# Remove taxa absent after rarefaction
 
 ps_rarefied <- phyloseq::prune_taxa(
   phyloseq::taxa_sums(ps_rarefied) > 0,
@@ -117,12 +217,14 @@ write_table(
 )
 
 # ------------------------------------------------------------
-# 3. Alpha diversity
+# 3. Calculate alpha diversity
 # ------------------------------------------------------------
 
 alpha <- data.frame(
   SampleID = rownames(counts_rarefied),
-  Observed = vegan::specnumber(counts_rarefied),
+  Observed = vegan::specnumber(
+    counts_rarefied
+  ),
   Shannon = vegan::diversity(
     counts_rarefied,
     index = "shannon"
@@ -135,19 +237,28 @@ alpha <- dplyr::left_join(
   by = "SampleID"
 )
 
+alpha$Group <- factor(
+  alpha$Group,
+  levels = group_levels
+)
+
 write_table(
   alpha,
   "alpha_diversity_by_sample.csv"
 )
 
 alpha_summary <- alpha %>%
-  dplyr::group_by(Host, Season) %>%
+  dplyr::group_by(
+    Host,
+    Season,
+    Group
+  ) %>%
   dplyr::summarise(
     N = dplyr::n(),
     MeanObserved = mean(Observed),
-    SDObserved = sd(Observed),
+    SDObserved = stats::sd(Observed),
     MeanShannon = mean(Shannon),
-    SDShannon = sd(Shannon),
+    SDShannon = stats::sd(Shannon),
     .groups = "drop"
   )
 
@@ -157,12 +268,12 @@ write_table(
 )
 
 # ------------------------------------------------------------
-# 4. ANOVA and model diagnostics
+# 4. Alpha-diversity ANOVA
 # ------------------------------------------------------------
 
-# Age and Body_condition retain their imported
-# measurement scales. Missing predictor values are
-# excluded only from the corresponding fitted model.
+# Retain the original measurement scale of Age
+# and Body_condition. Categorical predictors
+# should be stored as factors.
 
 run_alpha_model <- function(response, data) {
 
@@ -174,90 +285,127 @@ run_alpha_model <- function(response, data) {
     "Body_condition"
   )
 
-  required <- c(response, predictors)
+  required <- c(
+    response,
+    predictors
+  )
 
   dat <- data[
-    stats::complete.cases(data[, required]),
-    required,
+    stats::complete.cases(
+      data[, required, drop = FALSE]
+    ),
+    ,
     drop = FALSE
   ]
 
   dat <- droplevels(dat)
 
   if (nrow(dat) < 8) {
-    warning(
+    stop(
       "Insufficient complete observations for ",
-      response,
-      " ANOVA"
+      response
     )
-    return(NULL)
   }
 
   for (variable in predictors) {
-    if (is.factor(dat[[variable]]) &&
-        nlevels(dat[[variable]]) < 2) {
-      warning(
-        "Predictor ", variable,
-        " has fewer than two levels"
+
+    values <- dat[[variable]]
+
+    if (
+      is.factor(values) &&
+      nlevels(values) < 2
+    ) {
+      stop(
+        "Predictor has fewer than two levels: ",
+        variable
       )
-      return(NULL)
+    }
+
+    if (
+      is.numeric(values) &&
+      length(unique(values)) < 2
+    ) {
+      stop(
+        "Predictor has no variation: ",
+        variable
+      )
     }
   }
 
-  formula <- stats::reformulate(
+  model_formula <- stats::reformulate(
     predictors,
     response = response
   )
 
-  fit <- stats::lm(
-    formula,
+  design <- stats::model.matrix(
+    model_formula,
     data = dat
   )
 
-  if (fit$rank < length(stats::coef(fit))) {
-    warning(
-      "Rank-deficient model for ",
-      response,
-      "; review predictor coding"
+  if (
+    qr(design)$rank < ncol(design)
+  ) {
+    stop(
+      "Rank-deficient alpha-diversity model for ",
+      response
     )
   }
+
+  fit <- stats::aov(
+    model_formula,
+    data = dat
+  )
 
   anova_table <- as.data.frame(
     stats::anova(fit)
   )
 
-  anova_table$Term <- rownames(anova_table)
+  anova_table$Term <- rownames(
+    anova_table
+  )
 
   write_table(
     anova_table,
-    paste0("ANOVA_", response, ".csv")
+    paste0(
+      "ANOVA_",
+      response,
+      ".csv"
+    )
   )
 
-  # Shapiro-Wilk residual normality test
+  # Shapiro-Wilk residual normality.
 
-  residuals_model <- stats::residuals(fit)
+  residual_values <- stats::residuals(
+    fit
+  )
 
-  if (length(residuals_model) >= 3 &&
-      length(residuals_model) <= 5000) {
+  if (
+    length(residual_values) >= 3 &&
+    length(residual_values) <= 5000
+  ) {
 
     shapiro_result <- stats::shapiro.test(
-      residuals_model
+      residual_values
     )
 
     capture.output(
       shapiro_result,
       file = file.path(
         "results/tables",
-        paste0("Shapiro_", response, ".txt")
+        paste0(
+          "Shapiro_",
+          response,
+          ".txt"
+        )
       )
     )
   }
 
-  # Levene's test for Host x Season groups
+  # Levene's test across host-season groups.
 
   levene_result <- car::leveneTest(
     dat[[response]],
-    interaction(
+    group = interaction(
       dat$Host,
       dat$Season,
       drop = TRUE
@@ -269,45 +417,57 @@ run_alpha_model <- function(response, data) {
     levene_result,
     file = file.path(
       "results/tables",
-      paste0("Levene_", response, ".txt")
+      paste0(
+        "Levene_",
+        response,
+        ".txt"
+      )
     )
   )
 
-  # Tukey-adjusted host comparisons
-  # from the fitted additive model
+  # Tukey-adjusted host comparisons from
+  # the fitted model.
 
-  if (requireNamespace("emmeans", quietly = TRUE)) {
-
-    host_emmeans <- emmeans::emmeans(
-      fit,
-      ~ Host
-    )
-
-    host_pairs <- as.data.frame(
-      emmeans::pairs(
-        host_emmeans,
-        adjust = "tukey"
-      )
-    )
-
-    write_table(
-      host_pairs,
-      paste0("Tukey_Host_", response, ".csv")
-    )
-
-  } else {
-
-    warning(
-      "Install emmeans for adjusted ",
-      "host comparisons"
+  if (!requireNamespace(
+    "emmeans",
+    quietly = TRUE
+  )) {
+    stop(
+      "Install emmeans before running ",
+      "alpha-diversity models"
     )
   }
+
+  host_emmeans <- emmeans::emmeans(
+    fit,
+    ~ Host
+  )
+
+  host_pairs <- as.data.frame(
+    emmeans::pairs(
+      host_emmeans,
+      adjust = "tukey"
+    )
+  )
+
+  write_table(
+    host_pairs,
+    paste0(
+      "Tukey_Host_",
+      response,
+      ".csv"
+    )
+  )
 
   capture.output(
     summary(fit),
     file = file.path(
       "results/tables",
-      paste0("model_summary_", response, ".txt")
+      paste0(
+        "model_summary_",
+        response,
+        ".txt"
+      )
     )
   )
 
@@ -333,140 +493,167 @@ saveRDS(
 )
 
 # ------------------------------------------------------------
-# 5. Alpha diversity figures
+# 5. Figure 6A: Observed genus richness
 # ------------------------------------------------------------
 
-p_richness <- ggplot(
-  alpha,
-  aes(
-    x = Host,
-    y = Observed,
-    fill = Season
-  )
+alpha_theme <- ggplot2::theme_classic(
+  base_size = 14
 ) +
-  geom_boxplot(
-    width = 0.65,
-    outlier.shape = NA,
-    alpha = 0.8
-  ) +
-  geom_jitter(
-    aes(color = Season),
-    width = 0.12,
-    height = 0,
-    size = 2,
-    alpha = 0.85
-  ) +
-  scale_fill_manual(
-    values = c(
-      Spring = "#A7D3F2",
-      Winter = "#F9D291"
-    )
-  ) +
-  scale_color_manual(
-    values = c(
-      Spring = "#4A90C2",
-      Winter = "#D89A35"
-    )
-  ) +
-  labs(
-    x = "Host species",
-    y = "Observed genus richness",
-    fill = "Season",
-    color = "Season"
-  ) +
-  theme_classic(base_size = 14) +
-  theme(
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(
       face = "bold",
       color = "black"
     ),
-    legend.title = element_text(face = "bold")
+    axis.text = ggplot2::element_text(
+      face = "bold",
+      color = "black"
+    ),
+    axis.text.x = ggplot2::element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    ),
+    legend.position = "none",
+    panel.background = ggplot2::element_rect(
+      fill = "white",
+      color = NA
+    ),
+    plot.background = ggplot2::element_rect(
+      fill = "white",
+      color = NA
+    )
   )
 
-p_shannon <- ggplot(
+p_richness <- ggplot2::ggplot(
   alpha,
-  aes(
-    x = Host,
-    y = Shannon,
-    fill = Season
+  ggplot2::aes(
+    x = Group,
+    y = Observed,
+    fill = Group
   )
 ) +
-  geom_boxplot(
-    width = 0.65,
-    outlier.shape = NA,
-    alpha = 0.8
+  ggplot2::geom_violin(
+    trim = FALSE,
+    scale = "width",
+    linewidth = 0.5,
+    color = "black"
   ) +
-  geom_jitter(
-    aes(color = Season),
-    width = 0.12,
+  ggplot2::geom_jitter(
+    width = 0.08,
     height = 0,
-    size = 2,
-    alpha = 0.85
+    size = 1.8,
+    color = "black",
+    alpha = 0.9
   ) +
-  scale_fill_manual(
-    values = c(
-      Spring = "#A7D3F2",
-      Winter = "#F9D291"
-    )
+  ggplot2::scale_fill_manual(
+    values = group_colors,
+    drop = FALSE
   ) +
-  scale_color_manual(
-    values = c(
-      Spring = "#4A90C2",
-      Winter = "#D89A35"
-    )
+  ggplot2::labs(
+    x = NULL,
+    y = "Observed genus richness"
   ) +
-  labs(
-    x = "Host species",
-    y = "Shannon diversity",
-    fill = "Season",
-    color = "Season"
+  alpha_theme
+
+# ------------------------------------------------------------
+# 6. Figure 6B: Shannon diversity
+# ------------------------------------------------------------
+
+p_shannon <- ggplot2::ggplot(
+  alpha,
+  ggplot2::aes(
+    x = Group,
+    y = Shannon,
+    fill = Group
+  )
+) +
+  ggplot2::geom_violin(
+    trim = FALSE,
+    scale = "width",
+    linewidth = 0.5,
+    color = "black"
   ) +
-  theme_classic(base_size = 14) +
-  theme(
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(
+  ggplot2::geom_jitter(
+    width = 0.08,
+    height = 0,
+    size = 1.8,
+    color = "black",
+    alpha = 0.9
+  ) +
+  ggplot2::scale_fill_manual(
+    values = group_colors,
+    drop = FALSE
+  ) +
+  ggplot2::labs(
+    x = NULL,
+    y = "Shannon diversity"
+  ) +
+  alpha_theme
+
+# ------------------------------------------------------------
+# 7. Combine Figure 6A and 6B
+# ------------------------------------------------------------
+
+figure6 <- (
+  p_richness +
+    p_shannon
+) +
+  patchwork::plot_layout(
+    ncol = 2
+  ) +
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+  ggplot2::theme(
+    plot.tag = ggplot2::element_text(
       face = "bold",
-      color = "black"
-    ),
-    legend.title = element_text(face = "bold")
+      size = 16
+    )
   )
 
 save_figure(
   p_richness,
-  "alpha_observed_richness.png",
-  width = 10,
-  height = 6
+  "Figure_6A_observed_genus_richness.png",
+  width = 9,
+  height = 7
 )
 
 save_figure(
   p_shannon,
-  "alpha_shannon_diversity.png",
-  width = 10,
-  height = 6
+  "Figure_6B_shannon_diversity.png",
+  width = 9,
+  height = 7
+)
+
+save_figure(
+  figure6,
+  "Figure_6_alpha_diversity.png",
+  width = 17,
+  height = 8
 )
 
 # ------------------------------------------------------------
-# 6. Species accumulation curves
+# 8. Prepare host-season sample groups
 # ------------------------------------------------------------
 
-# Accumulation is calculated separately for each
-# host-season group using randomized sample order.
-
 group_ids <- split(
-  rownames(counts_rarefied),
+  rownames(counts),
   metadata$Group,
   drop = TRUE
 )
+
+# ------------------------------------------------------------
+# 9. Genus accumulation curves
+# ------------------------------------------------------------
 
 accumulation_results <- lapply(
   names(group_ids),
   function(group_name) {
 
-    sample_ids <- group_ids[[group_name]]
+    ids <- group_ids[[group_name]]
 
     group_mat <- counts_rarefied[
-      sample_ids,
+      ids,
       ,
       drop = FALSE
     ]
@@ -496,86 +683,168 @@ accumulation_df <- dplyr::bind_rows(
   accumulation_results
 )
 
+accumulation_df$Group <- factor(
+  accumulation_df$Group,
+  levels = group_levels
+)
+
 write_table(
   accumulation_df,
   "genus_accumulation_curves.csv"
 )
 
-p_accumulation <- ggplot(
+# ------------------------------------------------------------
+# 10. Figure 2A: Genus accumulation
+# ------------------------------------------------------------
+
+p_accumulation <- ggplot2::ggplot(
   accumulation_df,
-  aes(
+  ggplot2::aes(
     x = Samples,
     y = Richness,
     color = Group,
     fill = Group
   )
 ) +
-  geom_ribbon(
-    aes(
+  ggplot2::geom_ribbon(
+    ggplot2::aes(
       ymin = pmax(0, Richness - SD),
       ymax = Richness + SD
     ),
     alpha = 0.12,
     color = NA
   ) +
-  geom_line(linewidth = 1) +
-  labs(
-    x = "Sample size",
-    y = "Number of plant genera detected",
+  ggplot2::geom_line(
+    linewidth = 1
+  ) +
+  ggplot2::scale_color_manual(
+    values = group_colors
+  ) +
+  ggplot2::scale_fill_manual(
+    values = group_colors
+  ) +
+  ggplot2::labs(
+    x = "Number of samples",
+    y = "Cumulative plant genera",
     color = "Host - Season",
     fill = "Host - Season"
   ) +
-  theme_classic(base_size = 14) +
-  theme(
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(
+  ggplot2::theme_classic(
+    base_size = 13
+  ) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.text = ggplot2::element_text(
       face = "bold",
       color = "black"
     ),
-    legend.title = element_text(face = "bold")
+    legend.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    plot.background = ggplot2::element_rect(
+      fill = "white",
+      color = NA
+    )
   )
 
 save_figure(
   p_accumulation,
-  "genus_accumulation.png",
+  "Figure_2A_genus_accumulation.png",
   width = 10,
   height = 7
 )
 
 # ------------------------------------------------------------
-# 7. Individual-sample rarefaction curves
+# 11. Individual-sample rarefaction curves
 # ------------------------------------------------------------
 
-# Curves are calculated from pre-rarefaction counts.
+# Calculate expected genus richness at a series
+# of sequencing depths from unrarefied counts.
+#
+# Depths are determined separately for each sample.
+# No taxa or sample-specific results are predefined.
 
-rare_list <- vegan::rarecurve(
-  counts,
-  step = 500,
-  label = FALSE,
-  tidy = FALSE
+calculate_rarefaction <- function(
+    sample_counts,
+    sample_id,
+    n_points = 100
+) {
+
+  total_reads <- sum(sample_counts)
+
+  depths <- unique(
+    as.integer(
+      round(
+        seq(
+          1,
+          total_reads,
+          length.out = n_points
+        )
+      )
+    )
+  )
+
+  richness <- vapply(
+    depths,
+    function(depth) {
+
+      if (depth == total_reads) {
+        return(
+          sum(sample_counts > 0)
+        )
+      }
+
+      as.numeric(
+        vegan::rarefy(
+          sample_counts,
+          sample = depth
+        )
+      )
+    },
+    numeric(1)
+  )
+
+  data.frame(
+    SampleID = sample_id,
+    Reads = depths,
+    Richness = richness
+  )
+}
+
+rarefaction_results <- lapply(
+  rownames(counts),
+  function(sample_id) {
+
+    calculate_rarefaction(
+      sample_counts = counts[
+        sample_id,
+        ,
+        drop = TRUE
+      ],
+      sample_id = sample_id
+    )
+  }
 )
 
 rare_df <- dplyr::bind_rows(
-  lapply(
-    seq_along(rare_list),
-    function(i) {
-
-      curve <- rare_list[[i]]
-
-      data.frame(
-        SampleID = rownames(counts)[i],
-        Reads = attr(curve, "Subsample"),
-        Richness = as.numeric(curve)
-      )
-    }
-  )
+  rarefaction_results
 )
 
 rare_df <- dplyr::left_join(
   rare_df,
   metadata %>%
-    dplyr::select(SampleID, Group),
+    dplyr::select(
+      SampleID,
+      Group
+    ),
   by = "SampleID"
+)
+
+rare_df$Group <- factor(
+  rare_df$Group,
+  levels = group_levels
 )
 
 write_table(
@@ -583,68 +852,99 @@ write_table(
   "genus_rarefaction_curves.csv"
 )
 
-p_rarefaction <- ggplot(
+# ------------------------------------------------------------
+# 12. Figure 2B: Rarefaction curves
+# ------------------------------------------------------------
+
+p_rarefaction <- ggplot2::ggplot(
   rare_df,
-  aes(
+  ggplot2::aes(
     x = Reads,
     y = Richness,
     group = SampleID,
     color = Group
   )
 ) +
-  geom_line(
-    linewidth = 0.7,
-    alpha = 0.75
+  ggplot2::geom_line(
+    linewidth = 0.65,
+    alpha = 0.8
   ) +
-  labs(
+  ggplot2::geom_vline(
+    xintercept = rarefaction_depth,
+    linetype = "dashed",
+    color = "gray40",
+    linewidth = 0.6
+  ) +
+  ggplot2::scale_color_manual(
+    values = group_colors
+  ) +
+  ggplot2::labs(
     x = "Sequencing depth (reads)",
-    y = "Observed genus richness",
+    y = "Expected genus richness",
     color = "Host - Season"
   ) +
-  theme_classic(base_size = 14) +
-  theme(
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(
+  ggplot2::theme_classic(
+    base_size = 13
+  ) +
+  ggplot2::theme(
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.text = ggplot2::element_text(
       face = "bold",
       color = "black"
     ),
-    legend.title = element_text(face = "bold")
+    legend.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    plot.background = ggplot2::element_rect(
+      fill = "white",
+      color = NA
+    )
   )
 
 save_figure(
   p_rarefaction,
-  "genus_rarefaction.png",
+  "Figure_2B_genus_rarefaction.png",
   width = 10,
   height = 7
 )
 
 # ------------------------------------------------------------
-# 8. Combined accumulation and rarefaction figure
+# 13. Combine Figure 2A and 2B
 # ------------------------------------------------------------
 
-p_sampling <- (
+figure2 <- (
   p_accumulation +
-    ggplot2::ggtitle("A")
+    p_rarefaction
 ) +
-  (
-    p_rarefaction +
-      ggplot2::ggtitle("B")
+  patchwork::plot_layout(
+    ncol = 2,
+    guides = "collect"
   ) +
-  patchwork::plot_layout(ncol = 2)
+  patchwork::plot_annotation(
+    tag_levels = "A"
+  ) &
+  ggplot2::theme(
+    plot.tag = ggplot2::element_text(
+      face = "bold",
+      size = 16
+    )
+  )
 
 save_figure(
-  p_sampling,
+  figure2,
   "Figure_2_accumulation_rarefaction.png",
-  width = 16,
-  height = 7
+  width = 17,
+  height = 8
 )
 
 # ------------------------------------------------------------
-# 9. iNEXT sample coverage
+# 14. iNEXT sample coverage
 # ------------------------------------------------------------
 
-# Pool genus counts by host-season group.
-# Incidence and abundance estimators are not mixed.
+# Pool original genus counts within each
+# host-season group.
 
 coverage_input <- lapply(
   group_ids,
@@ -658,7 +958,9 @@ coverage_input <- lapply(
       ]
     )
 
-    as.numeric(pooled[pooled > 0])
+    as.numeric(
+      pooled[pooled > 0]
+    )
   }
 )
 
@@ -673,20 +975,22 @@ write_table(
 )
 
 # ------------------------------------------------------------
-# 10. Pianka's niche overlap
+# 15. Pianka's dietary niche overlap
 # ------------------------------------------------------------
 
-# Mean sample-wise genus proportions for each
-# host-season group.
+# Calculate genus proportions for each sample,
+# then average within each host-season group.
 
-prop <- make_prop(counts_rarefied)
+proportions <- make_prop(
+  counts_rarefied
+)
 
 group_profiles <- lapply(
   group_ids,
   function(ids) {
 
     colMeans(
-      prop[
+      proportions[
         ids,
         ,
         drop = FALSE
@@ -695,14 +999,14 @@ group_profiles <- lapply(
   }
 )
 
-profile_mat <- do.call(
+profile_matrix <- do.call(
   rbind,
   group_profiles
 )
 
-# Explicit Pianka index:
-# sum(p_i * p_j) /
-# sqrt(sum(p_i^2) * sum(p_j^2))
+# Pianka overlap:
+# sum(p_i * q_i) /
+# sqrt(sum(p_i^2) * sum(q_i^2))
 
 pianka_index <- function(p, q) {
 
@@ -717,7 +1021,9 @@ pianka_index <- function(p, q) {
   sum(p * q) / denominator
 }
 
-group_names <- rownames(profile_mat)
+group_names <- rownames(
+  profile_matrix
+)
 
 pianka_matrix <- matrix(
   NA_real_,
@@ -730,29 +1036,34 @@ pianka_matrix <- matrix(
 )
 
 for (i in seq_along(group_names)) {
+
   for (j in seq_along(group_names)) {
 
     pianka_matrix[i, j] <- pianka_index(
-      profile_mat[i, ],
-      profile_mat[j, ]
+      profile_matrix[i, ],
+      profile_matrix[j, ]
     )
   }
 }
 
 write_table(
   tibble::rownames_to_column(
-    as.data.frame(pianka_matrix),
-    "Group"
+    as.data.frame(
+      pianka_matrix,
+      check.names = FALSE
+    ),
+    var = "Group"
   ),
   "pianka_overlap_matrix.csv"
 )
 
 # ------------------------------------------------------------
-# 11. Pairwise niche overlap summary
+# 16. Pairwise Pianka overlap summary
 # ------------------------------------------------------------
 
 pianka_pairs <- as.data.frame(
-  as.table(pianka_matrix)
+  as.table(pianka_matrix),
+  stringsAsFactors = FALSE
 )
 
 names(pianka_pairs) <- c(
@@ -762,9 +1073,12 @@ names(pianka_pairs) <- c(
 )
 
 pianka_pairs <- pianka_pairs %>%
+  dplyr::mutate(
+    Group1 = as.character(Group1),
+    Group2 = as.character(Group2)
+  ) %>%
   dplyr::filter(
-    as.character(Group1) <
-      as.character(Group2)
+    Group1 < Group2
   )
 
 group_info <- metadata %>%
@@ -798,11 +1112,14 @@ pianka_pairs <- pianka_pairs %>%
   ) %>%
   dplyr::mutate(
     Comparison = dplyr::case_when(
-      Host1 == Host2 & Season1 != Season2 ~
+      Host1 == Host2 &
+        Season1 != Season2 ~
         "Within-host seasonal",
-      Host1 != Host2 & Season1 == Season2 ~
+      Host1 != Host2 &
+        Season1 == Season2 ~
         "Between-host same season",
-      TRUE ~ "Between-host different seasons"
+      TRUE ~
+        "Between-host different seasons"
     )
   )
 
@@ -812,7 +1129,7 @@ write_table(
 )
 
 # ------------------------------------------------------------
-# 12. Save diversity objects
+# 17. Save analysis objects
 # ------------------------------------------------------------
 
 saveRDS(
@@ -820,17 +1137,22 @@ saveRDS(
     counts_rarefied = counts_rarefied,
     phyloseq_rarefied = ps_rarefied,
     alpha = alpha,
+    alpha_summary = alpha_summary,
+    model_observed = model_observed,
+    model_shannon = model_shannon,
     accumulation = accumulation_df,
     rarefaction = rare_df,
     coverage = coverage_results,
     pianka_matrix = pianka_matrix,
-    pianka_pairs = pianka_pairs
+    pianka_pairs = pianka_pairs,
+    figure2 = figure2,
+    figure6 = figure6
   ),
   "results/objects/diversity_overlap_objects.rds"
 )
 
 # ------------------------------------------------------------
-# 13. Final summary
+# 18. Completion
 # ------------------------------------------------------------
 
 cat(
@@ -839,8 +1161,14 @@ cat(
   "Samples: ", nrow(counts_rarefied), "\n",
   "Genera after rarefaction: ",
   sum(colSums(counts_rarefied) > 0), "\n",
-  "Rarefaction depth: ", rarefaction_depth, "\n",
-  "Figures: PNG, 600 DPI\n",
+  "Rarefaction depth: ",
+  rarefaction_depth, "\n",
+  "Figure 2A: Genus accumulation\n",
+  "Figure 2B: Rarefaction\n",
+  "Figure 6A: Observed genus richness\n",
+  "Figure 6B: Shannon diversity\n",
+  "PNG: 600 DPI, white background\n",
   "========================================\n",
   sep = ""
 )
+
