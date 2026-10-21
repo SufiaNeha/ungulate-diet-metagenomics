@@ -1,55 +1,51 @@
-
 source("scripts/00_setup.R")
 
 # ------------------------------------------------------------
 # 1. Load curated data
 # ------------------------------------------------------------
 
-objects <- readRDS("results/phyloseq_objects.rds")
+objects <- readRDS(
+  "results/phyloseq_objects.rds"
+)
 
 ps_genus <- objects$genus
 ps_family <- objects$family
 
-genus_counts <- get_mat(ps_genus)
-family_counts <- get_mat(ps_family)
-
 metadata <- get_meta(ps_genus)
 
-metadata <- metadata[
-  rownames(genus_counts),
-  ,
-  drop = FALSE
-]
-
-stopifnot(
-  identical(
-    rownames(genus_counts),
-    rownames(metadata)
-  )
+host_order <- c(
+  "Aoudad",
+  "Desert bighorn sheep",
+  "Mule deer"
 )
 
-family_counts <- family_counts[
-  rownames(genus_counts),
-  ,
-  drop = FALSE
-]
+season_order <- c(
+  "Spring",
+  "Winter"
+)
 
 metadata$Host <- factor(
   metadata$Host,
-  levels = c(
-    "Aoudad",
-    "Desert bighorn sheep",
-    "Mule deer"
-  )
+  levels = host_order
 )
 
 metadata$Season <- factor(
   metadata$Season,
-  levels = c("Spring", "Winter")
+  levels = season_order
 )
 
-if (anyNA(metadata$Host) || anyNA(metadata$Season)) {
-  stop("Invalid Host or Season metadata")
+if (
+  anyNA(metadata$Host) ||
+  anyNA(metadata$Season)
+) {
+  stop("Missing or unrecognized Host/Season values")
+}
+
+if (
+  anyNA(metadata$SampleID) ||
+  anyDuplicated(metadata$SampleID)
+) {
+  stop("Missing or duplicate SampleID values")
 }
 
 # ------------------------------------------------------------
@@ -65,28 +61,33 @@ aggregate_taxa <- function(ps, rank) {
     "matrix"
   )
 
+  if (!rank %in% colnames(taxonomy)) {
+    stop("Taxonomic rank not found: ", rank)
+  }
+
   labels <- trimws(
     as.character(
       taxonomy[colnames(mat), rank]
     )
   )
 
-  invalid <- is.na(labels) | labels == ""
-
-  if (any(invalid)) {
+  if (
+    anyNA(labels) ||
+    any(labels == "")
+  ) {
     stop(
-      "Missing ", rank, " labels for ",
-      sum(invalid), " taxa"
+      "Missing taxonomic labels at rank: ",
+      rank
     )
   }
 
-  t(
-    rowsum(
-      t(mat),
-      group = labels,
-      reorder = TRUE
-    )
+  aggregated <- rowsum(
+    t(mat),
+    group = labels,
+    reorder = TRUE
   )
+
+  t(aggregated)
 }
 
 genus_counts <- aggregate_taxa(
@@ -99,51 +100,103 @@ family_counts <- aggregate_taxa(
   "Family"
 )
 
+# ------------------------------------------------------------
+# 3. Match sample order
+# ------------------------------------------------------------
+
+if (!setequal(
+  rownames(genus_counts),
+  metadata$SampleID
+)) {
+  stop("Genus counts and metadata do not match")
+}
+
+if (!setequal(
+  rownames(family_counts),
+  metadata$SampleID
+)) {
+  stop("Family counts and metadata do not match")
+}
+
+genus_counts <- genus_counts[
+  metadata$SampleID,
+  ,
+  drop = FALSE
+]
+
+family_counts <- family_counts[
+  metadata$SampleID,
+  ,
+  drop = FALSE
+]
+
+if (
+  any(rowSums(genus_counts) <= 0) ||
+  any(rowSums(family_counts) <= 0)
+) {
+  stop("Zero-count samples detected")
+}
+
+# ------------------------------------------------------------
+# 4. Sample-level relative abundances
+# ------------------------------------------------------------
+
 genus_prop <- make_prop(genus_counts)
 family_prop <- make_prop(family_counts)
 
+if (
+  any(!is.finite(genus_prop)) ||
+  any(!is.finite(family_prop))
+) {
+  stop("Non-finite relative abundances detected")
+}
+
 # ------------------------------------------------------------
-# 3. Shared colors and plot theme
+# 5. Shared plotting theme
 # ------------------------------------------------------------
 
-host_order <- c(
-  "Aoudad",
-  "Desert bighorn sheep",
-  "Mule deer"
-)
+composition_theme <- function() {
 
-season_order <- c("Spring", "Winter")
+  ggplot2::theme_classic(
+    base_size = 14
+  ) +
+    ggplot2::theme(
 
-theme_composition <- function() {
-
-  theme_classic(base_size = 15) +
-    theme(
-      axis.title = element_text(
+      axis.title = ggplot2::element_text(
         face = "bold",
         color = "black"
       ),
-      axis.text = element_text(
+
+      axis.text = ggplot2::element_text(
         face = "bold",
         color = "#555555"
       ),
-      legend.title = element_text(
+
+      legend.title = ggplot2::element_text(
         face = "bold",
         color = "black"
       ),
-      legend.text = element_text(
+
+      legend.text = ggplot2::element_text(
+        color = "black"
+      ),
+
+      plot.title = ggplot2::element_text(
         face = "bold",
         color = "black"
       ),
-      plot.title = element_text(
+
+      plot.tag = ggplot2::element_text(
         face = "bold",
-        hjust = 0.5,
-        color = "black"
+        size = 17
       ),
-      panel.background = element_rect(
+
+      panel.background = ggplot2::element_rect(
         fill = "white",
         color = NA
       ),
-      plot.background = element_rect(
+
+      plot.background = ggplot2::element_rect(
         fill = "white",
         color = NA
       )
@@ -151,10 +204,93 @@ theme_composition <- function() {
 }
 
 # ------------------------------------------------------------
-# 4. Functional group classification
+# 6. Helper: Aggregate proportions by category
 # ------------------------------------------------------------
 
-# Mapping file columns:
+aggregate_proportions <- function(
+    prop_matrix,
+    categories
+) {
+
+  if (
+    length(categories) != ncol(prop_matrix) ||
+    anyNA(categories)
+  ) {
+    stop("Invalid category assignments")
+  }
+
+  result <- t(
+    rowsum(
+      t(prop_matrix),
+      group = categories,
+      reorder = TRUE
+    )
+  )
+
+  if (
+    any(abs(rowSums(result) - 1) > 1e-8)
+  ) {
+    stop(
+      "Aggregated proportions do not sum to one"
+    )
+  }
+
+  result
+}
+
+# ------------------------------------------------------------
+# 7. Helper: Mean relative abundance by host
+# ------------------------------------------------------------
+
+mean_by_host <- function(prop_matrix) {
+
+  result <- dplyr::bind_rows(
+    lapply(
+      host_order,
+      function(host_name) {
+
+        ids <- metadata$SampleID[
+          metadata$Host == host_name
+        ]
+
+        if (length(ids) == 0) {
+          stop("No samples for ", host_name)
+        }
+
+        means <- colMeans(
+          prop_matrix[
+            ids,
+            ,
+            drop = FALSE
+          ]
+        )
+
+        data.frame(
+          Host = host_name,
+          Category = names(means),
+          MeanAbundance = unname(means),
+          stringsAsFactors = FALSE
+        )
+      }
+    )
+  )
+
+  result$Host <- factor(
+    result$Host,
+    levels = host_order
+  )
+
+  result
+}
+
+# ------------------------------------------------------------
+# 8. Functional group assignments
+# ------------------------------------------------------------
+
+# Required input:
+# config/plant_functional_groups.csv
+#
+# Columns:
 # Genus,FunctionalGroup
 #
 # Functional groups:
@@ -164,7 +300,7 @@ functional_file <- "config/plant_functional_groups.csv"
 
 if (!file.exists(functional_file)) {
   stop(
-    "Missing file: ",
+    "Missing functional group mapping: ",
     functional_file
   )
 }
@@ -179,8 +315,8 @@ if (!all(
     names(functional_map)
 )) {
   stop(
-    "Functional group mapping requires ",
-    "Genus and FunctionalGroup"
+    "Mapping requires Genus and ",
+    "FunctionalGroup columns"
   )
 }
 
@@ -192,17 +328,11 @@ functional_map <- functional_map %>%
     )
   )
 
-# Normalize singular and plural labels.
-
 functional_map$FunctionalGroup <- dplyr::recode(
   functional_map$FunctionalGroup,
-  "Browse" = "Browse",
   "Browses" = "Browse",
-  "Forb" = "Forb",
   "Forbs" = "Forb",
-  "Grass" = "Grass",
   "Grasses" = "Grass",
-  "Succulent" = "Succulent",
   "Succulents" = "Succulent"
 )
 
@@ -213,15 +343,20 @@ functional_levels <- c(
   "Succulent"
 )
 
-if (anyDuplicated(functional_map$Genus)) {
-  stop("Duplicate genus assignments in mapping")
+if (
+  anyNA(functional_map$Genus) ||
+  any(functional_map$Genus == "") ||
+  anyDuplicated(functional_map$Genus)
+) {
+  stop("Invalid or duplicate genus assignments")
 }
 
-if (any(
-  !functional_map$FunctionalGroup %in%
-    functional_levels
-)) {
-  stop("Invalid functional group classification")
+if (
+  anyNA(functional_map$FunctionalGroup) ||
+  any(!functional_map$FunctionalGroup %in%
+        functional_levels)
+) {
+  stop("Invalid functional group assignments")
 }
 
 missing_genera <- setdiff(
@@ -231,74 +366,46 @@ missing_genera <- setdiff(
 
 if (length(missing_genera) > 0) {
   stop(
-    "Functional group assignments missing for: ",
+    "Missing functional group assignments for: ",
     paste(missing_genera, collapse = ", ")
   )
 }
 
 # ------------------------------------------------------------
-# 5. Functional group relative abundance
+# 9. Calculate functional group composition
 # ------------------------------------------------------------
 
-genus_long <- as.data.frame(
+functional_categories <- functional_map$FunctionalGroup[
+  match(
+    colnames(genus_prop),
+    functional_map$Genus
+  )
+]
+
+functional_prop <- aggregate_proportions(
   genus_prop,
-  check.names = FALSE
+  functional_categories
+)
+
+functional_summary <- mean_by_host(
+  functional_prop
 ) %>%
-  tibble::rownames_to_column("SampleID") %>%
-  tidyr::pivot_longer(
-    cols = -SampleID,
-    names_to = "Genus",
-    values_to = "RelativeAbundance"
-  ) %>%
-  dplyr::left_join(
-    metadata %>%
-      dplyr::select(SampleID, Host, Season),
-    by = "SampleID"
+  dplyr::rename(
+    FunctionalGroup = Category
   )
 
-functional_long <- genus_long %>%
-  dplyr::left_join(
-    functional_map,
-    by = "Genus"
-  ) %>%
-  dplyr::group_by(
-    SampleID,
-    Host,
-    FunctionalGroup
-  ) %>%
-  dplyr::summarise(
-    RelativeAbundance = sum(RelativeAbundance),
-    .groups = "drop"
-  )
-
-functional_summary <- functional_long %>%
-  dplyr::group_by(
-    Host,
-    FunctionalGroup
-  ) %>%
-  dplyr::summarise(
-    MeanAbundance = mean(RelativeAbundance),
-    .groups = "drop"
-  ) %>%
-  tidyr::complete(
-    Host,
-    FunctionalGroup = functional_levels,
-    fill = list(MeanAbundance = 0)
-  ) %>%
-  dplyr::mutate(
-    FunctionalGroup = factor(
-      FunctionalGroup,
-      levels = functional_levels
-    )
-  )
+functional_summary$FunctionalGroup <- factor(
+  functional_summary$FunctionalGroup,
+  levels = functional_levels
+)
 
 write_table(
   functional_summary,
-  "Figure_4A_functional_group_data.csv"
+  "Figure_4A_functional_groups.csv"
 )
 
 # ------------------------------------------------------------
-# 6. Figure 4A — Functional groups
+# 10. Figure 4A: Functional groups
 # ------------------------------------------------------------
 
 functional_colors <- c(
@@ -308,180 +415,183 @@ functional_colors <- c(
   "Succulent" = "#F8766D"
 )
 
-p_functional <- ggplot(
+p_functional <- ggplot2::ggplot(
   functional_summary,
-  aes(
+  ggplot2::aes(
     x = Host,
     y = MeanAbundance,
     fill = FunctionalGroup
   )
 ) +
-  geom_col(
-    width = 0.8,
-    color = NA
+  ggplot2::geom_col(
+    width = 0.8
   ) +
-  scale_fill_manual(
+  ggplot2::scale_fill_manual(
     values = functional_colors,
     breaks = c(
       "Succulent",
       "Grass",
       "Forb",
       "Browse"
-    )
+    ),
+    drop = FALSE
   ) +
-  scale_y_continuous(
+  ggplot2::scale_y_continuous(
     labels = scales::percent_format(
       accuracy = 1
     ),
     limits = c(0, 1),
     expand = c(0, 0)
   ) +
-  labs(
+  ggplot2::labs(
     x = NULL,
     y = "Relative abundance",
     fill = "Functional group"
   ) +
-  theme_composition()
+  composition_theme()
 
 # ------------------------------------------------------------
-# 7. Family relative abundance
+# 11. Select plant families
 # ------------------------------------------------------------
 
-family_long <- as.data.frame(
-  family_prop,
-  check.names = FALSE
-) %>%
-  tibble::rownames_to_column("SampleID") %>%
-  tidyr::pivot_longer(
-    cols = -SampleID,
-    names_to = "Family",
-    values_to = "RelativeAbundance"
-  ) %>%
-  dplyr::left_join(
-    metadata %>%
-      dplyr::select(SampleID, Host, Season),
-    by = "SampleID"
-  )
+# Families with overall mean relative abundance
+# >= 2% are displayed individually.
+# Remaining families are combined as Other.
 
-# Families displayed in Figure 4B
+family_threshold <- 0.02
 
-figure4_families <- c(
-  "Fabaceae",
-  "Poaceae",
-  "Amaranthaceae",
-  "Asteraceae",
-  "Cupressaceae",
-  "Malvaceae",
-  "Brassicaceae",
-  "Fagaceae",
-  "Cactaceae",
-  "Acanthaceae"
+family_mean <- sort(
+  colMeans(family_prop),
+  decreasing = TRUE
 )
 
-family_long <- family_long %>%
-  dplyr::mutate(
-    Family = ifelse(
-      Family %in% figure4_families,
-      Family,
-      "Other"
-    )
-  ) %>%
-  dplyr::group_by(
-    SampleID,
-    Host,
-    Family
-  ) %>%
-  dplyr::summarise(
-    RelativeAbundance = sum(RelativeAbundance),
-    .groups = "drop"
-  )
+selected_families <- names(
+  family_mean[
+    family_mean >= family_threshold
+  ]
+)
 
-family_summary <- family_long %>%
-  dplyr::group_by(
-    Host,
-    Family
-  ) %>%
-  dplyr::summarise(
-    MeanAbundance = mean(RelativeAbundance),
-    .groups = "drop"
-  ) %>%
-  tidyr::complete(
-    Host,
-    Family = c(
-      figure4_families,
-      "Other"
-    ),
-    fill = list(MeanAbundance = 0)
-  )
+if (length(selected_families) == 0) {
+  stop("No families meet the 2% threshold")
+}
 
-family_summary$Family <- factor(
-  family_summary$Family,
-  levels = c(
-    figure4_families,
-    "Other"
-  )
+family_selection_table <- data.frame(
+  Family = names(family_mean),
+  OverallMeanAbundance = unname(family_mean),
+  Selected = names(family_mean) %in%
+    selected_families,
+  stringsAsFactors = FALSE
 )
 
 write_table(
-  family_summary,
-  "Figure_4B_family_data.csv"
+  family_selection_table,
+  "Figure_4B_family_selection.csv"
 )
 
 # ------------------------------------------------------------
-# 8. Figure 4B — Plant families
+# 12. Combine remaining families as Other
 # ------------------------------------------------------------
 
+family_categories <- ifelse(
+  colnames(family_prop) %in%
+    selected_families,
+  colnames(family_prop),
+  "Other"
+)
+
+family_plot_prop <- aggregate_proportions(
+  family_prop,
+  family_categories
+)
+
+family_summary <- mean_by_host(
+  family_plot_prop
+) %>%
+  dplyr::rename(
+    Family = Category
+  )
+
+family_order <- c(
+  selected_families,
+  "Other"
+)
+
+family_summary$Family <- factor(
+  family_summary$Family,
+  levels = family_order
+)
+
+family_totals <- family_summary %>%
+  dplyr::group_by(Host) %>%
+  dplyr::summarise(
+    Total = sum(MeanAbundance),
+    .groups = "drop"
+  )
+
+if (
+  any(abs(family_totals$Total - 1) > 1e-8)
+) {
+  stop("Family proportions do not sum to one")
+}
+
+write_table(
+  family_summary,
+  "Figure_4B_family_composition.csv"
+)
+
+# ------------------------------------------------------------
+# 13. Generate family colors
+# ------------------------------------------------------------
+
+family_colors <- stats::setNames(
+  grDevices::hcl.colors(
+    length(selected_families),
+    palette = "Dynamic"
+  ),
+  selected_families
+)
+
 family_colors <- c(
-  "Fabaceae" = "#FFFF99",
-  "Poaceae" = "#6A3D9A",
-  "Amaranthaceae" = "#CAB2D6",
-  "Asteraceae" = "#FF7F00",
-  "Cupressaceae" = "#FDBF6F",
-  "Malvaceae" = "#E31A1C",
-  "Brassicaceae" = "#FB9A99",
-  "Fagaceae" = "#33A02C",
-  "Cactaceae" = "#B2DF8A",
-  "Acanthaceae" = "#1F78B4",
+  family_colors,
   "Other" = "#A6CEE3"
 )
 
-p_family <- ggplot(
+# ------------------------------------------------------------
+# 14. Figure 4B: Plant families
+# ------------------------------------------------------------
+
+p_family <- ggplot2::ggplot(
   family_summary,
-  aes(
+  ggplot2::aes(
     x = Host,
     y = MeanAbundance,
     fill = Family
   )
 ) +
-  geom_col(
-    width = 0.8,
-    color = NA
+  ggplot2::geom_col(
+    width = 0.8
   ) +
-  scale_fill_manual(
+  ggplot2::scale_fill_manual(
     values = family_colors,
-    breaks = rev(
-      c(
-        figure4_families,
-        "Other"
-      )
-    )
+    breaks = rev(family_order),
+    drop = FALSE
   ) +
-  scale_y_continuous(
+  ggplot2::scale_y_continuous(
     labels = scales::percent_format(
       accuracy = 1
     ),
     limits = c(0, 1),
     expand = c(0, 0)
   ) +
-  labs(
+  ggplot2::labs(
     x = NULL,
     y = "Relative abundance",
     fill = "Family"
   ) +
-  theme_composition()
+  composition_theme()
 
 # ------------------------------------------------------------
-# 9. Combine and export Figure 4
+# 15. Combine and export Figure 4
 # ------------------------------------------------------------
 
 figure4 <- (
@@ -490,18 +600,10 @@ figure4 <- (
 ) +
   patchwork::plot_layout(
     ncol = 2,
-    widths = c(1, 1.15)
+    widths = c(1, 1.2)
   ) +
   patchwork::plot_annotation(
     tag_levels = "A"
-  )
-
-figure4 <- figure4 &
-  theme(
-    plot.tag = element_text(
-      face = "bold",
-      size = 18
-    )
   )
 
 save_figure(
@@ -511,136 +613,36 @@ save_figure(
   height = 8
 )
 
-# ------------------------------------------------------------
-# 10. Figure 5 — Genus composition
-# ------------------------------------------------------------
+save_figure(
+  p_functional,
+  "Figure_4A_functional_groups.png",
+  width = 9,
+  height = 7
+)
 
-# Genus lists follow the six panels in Figure 5.
-
-figure5_genera <- list(
-
-  Aoudad = list(
-
-    Spring = c(
-      "Aristida",
-      "Astragalus",
-      "Hordeum",
-      "Prosopis",
-      "Juniperus",
-      "Bidens",
-      "Lepidium",
-      "Quercus",
-      "Sida",
-      "Lycium"
-    ),
-
-    Winter = c(
-      "Aristida",
-      "Astragalus",
-      "Hordeum",
-      "Prosopis",
-      "Atriplex",
-      "Bidens",
-      "Lepidium",
-      "Descurainia",
-      "Dyschoriste",
-      "Sida"
-    )
-  ),
-
-  "Desert bighorn sheep" = list(
-
-    Spring = c(
-      "Muhlenbergia",
-      "Astragalus",
-      "Sphaeralcea",
-      "Prosopis",
-      "Atriplex",
-      "Brickellia",
-      "Lepidium",
-      "Quercus",
-      "Rhus",
-      "Chenopodium"
-    ),
-
-    Winter = c(
-      "Muhlenbergia",
-      "Astragalus",
-      "Sphaeralcea",
-      "Prosopis",
-      "Atriplex",
-      "Brickellia",
-      "Lepidium",
-      "Quercus",
-      "Triticum",
-      "Chenopodium"
-    )
-  ),
-
-  "Mule deer" = list(
-
-    Spring = c(
-      "Acaciella",
-      "Prosopis",
-      "Atriplex",
-      "Juniperus",
-      "Gossypium",
-      "Chrysothamnus",
-      "Digitaria",
-      "Artemisia",
-      "Triticum",
-      "Euphorbia"
-    ),
-
-    Winter = c(
-      "Acaciella",
-      "Prosopis",
-      "Atriplex",
-      "Juniperus",
-      "Gossypium",
-      "Chrysothamnus",
-      "Opuntia",
-      "Digitaria",
-      "Yucca",
-      "Brassica"
-    )
-  )
+save_figure(
+  p_family,
+  "Figure_4B_plant_families.png",
+  width = 10,
+  height = 7
 )
 
 # ------------------------------------------------------------
-# 11. Figure 5 colors
+# 16. Select top 10 genera
 # ------------------------------------------------------------
 
-# Consistent colors for the displayed genus ranks.
-
-genus_rank_colors <- c(
-  "#B15928",
-  "#6A3D9A",
-  "#CAB2D6",
-  "#E9965B",
-  "#FF7F00",
-  "#FDBF6F",
-  "#E31A1C",
-  "#FB9A99",
-  "#1F78B4",
-  "#A6CEE3"
-)
-
-# ------------------------------------------------------------
-# 12. Calculate seasonal mean composition
-# ------------------------------------------------------------
-
-get_season_composition <- function(
+get_top_genera <- function(
     host_name,
-    season_name
+    season_name,
+    n = 10
 ) {
 
-  selected_samples <- metadata$SampleID[
+  ids <- metadata$SampleID[
     metadata$Host == host_name &
       metadata$Season == season_name
   ]
 
-  if (length(selected_samples) == 0) {
+  if (length(ids) == 0) {
     stop(
       "No samples for ",
       host_name,
@@ -649,68 +651,87 @@ get_season_composition <- function(
     )
   }
 
-  selected_matrix <- genus_prop[
-    selected_samples,
-    ,
-    drop = FALSE
+  mean_abundance <- colMeans(
+    genus_prop[
+      ids,
+      ,
+      drop = FALSE
+    ]
+  )
+
+  mean_abundance <- sort(
+    mean_abundance[
+      mean_abundance > 0
+    ],
+    decreasing = TRUE
+  )
+
+  names(
+    head(mean_abundance, n)
+  )
+}
+
+# ------------------------------------------------------------
+# 17. Calculate host-season genus composition
+# ------------------------------------------------------------
+
+calculate_genus_composition <- function(
+    host_name,
+    season_name
+) {
+
+  ids <- metadata$SampleID[
+    metadata$Host == host_name &
+      metadata$Season == season_name
   ]
 
   mean_abundance <- colMeans(
-    selected_matrix
+    genus_prop[
+      ids,
+      ,
+      drop = FALSE
+    ]
   )
 
-  selected_genera <- figure5_genera[
-    [host_name]
-  ][[season_name]]
-
-  absent_genera <- setdiff(
-    selected_genera,
-    names(mean_abundance)
+  top_genera <- get_top_genera(
+    host_name,
+    season_name,
+    n = 10
   )
 
-  if (length(absent_genera) > 0) {
-    warning(
-      "Genera absent from curated data for ",
-      host_name, " - ", season_name, ": ",
-      paste(absent_genera, collapse = ", ")
-    )
-  }
+  selected_abundance <- mean_abundance[
+    top_genera
+  ]
 
-  values <- stats::setNames(
-    numeric(length(selected_genera)),
-    selected_genera
-  )
-
-  present <- intersect(
-    selected_genera,
-    names(mean_abundance)
-  )
-
-  values[present] <- mean_abundance[present]
-
-  other <- max(
-    0,
-    1 - sum(values)
+  other_abundance <- sum(
+    mean_abundance[
+      !names(mean_abundance) %in%
+        top_genera
+    ]
   )
 
   data.frame(
     Host = host_name,
     Season = season_name,
     Genus = c(
-      selected_genera,
+      top_genera,
       "Other"
     ),
     RelativeAbundance = c(
-      unname(values),
-      other
+      unname(selected_abundance),
+      other_abundance
     ),
     Rank = c(
-      seq_along(selected_genera),
-      11L
+      seq_along(top_genera),
+      length(top_genera) + 1L
     ),
     stringsAsFactors = FALSE
   )
 }
+
+# ------------------------------------------------------------
+# 18. Generate Figure 5 composition data
+# ------------------------------------------------------------
 
 figure5_data <- dplyr::bind_rows(
   lapply(
@@ -722,7 +743,7 @@ figure5_data <- dplyr::bind_rows(
           season_order,
           function(season_name) {
 
-            get_season_composition(
+            calculate_genus_composition(
               host_name,
               season_name
             )
@@ -733,84 +754,157 @@ figure5_data <- dplyr::bind_rows(
   )
 )
 
+figure5_data$Host <- factor(
+  figure5_data$Host,
+  levels = host_order
+)
+
+figure5_data$Season <- factor(
+  figure5_data$Season,
+  levels = season_order
+)
+
 write_table(
   figure5_data,
-  "Figure_5_genus_composition_data.csv"
+  "Figure_5_genus_composition.csv"
+)
+
+top_genera_table <- figure5_data %>%
+  dplyr::filter(
+    Genus != "Other"
+  ) %>%
+  dplyr::arrange(
+    Host,
+    Season,
+    Rank
+  )
+
+write_table(
+  top_genera_table,
+  "Figure_5_top_10_genera.csv"
 )
 
 # ------------------------------------------------------------
-# 13. Plot each Figure 5 panel
+# 19. Validate genus proportions
 # ------------------------------------------------------------
 
-make_figure5_panel <- function(
-    host_name,
-    season_name
+genus_totals <- figure5_data %>%
+  dplyr::group_by(
+    Host,
+    Season
+  ) %>%
+  dplyr::summarise(
+    Total = sum(RelativeAbundance),
+    .groups = "drop"
+  )
+
+if (
+  any(abs(genus_totals$Total - 1) > 1e-8)
 ) {
+  stop("Genus proportions do not sum to one")
+}
+
+# ------------------------------------------------------------
+# 20. Automatic genus color assignment
+# ------------------------------------------------------------
+
+# The same genus receives the same color
+# across spring and winter within a host.
+
+make_host_palette <- function(host_name) {
+
+  host_data <- figure5_data %>%
+    dplyr::filter(
+      Host == host_name,
+      Genus != "Other"
+    )
+
+  genera <- unique(
+    as.character(host_data$Genus)
+  )
+
+  colors <- grDevices::hcl.colors(
+    length(genera),
+    palette = "Dynamic"
+  )
+
+  c(
+    stats::setNames(
+      colors,
+      genera
+    ),
+    "Other" = "#A6CEE3"
+  )
+}
+
+# ------------------------------------------------------------
+# 21. Plot seasonal genus composition by host
+# ------------------------------------------------------------
+
+make_host_figure <- function(host_name) {
 
   plot_data <- figure5_data %>%
     dplyr::filter(
-      Host == host_name,
-      Season == season_name
+      Host == host_name
     )
 
-  genus_order <- c(
-    plot_data$Genus[
-      plot_data$Genus != "Other"
-    ],
+  palette <- make_host_palette(
+    host_name
+  )
+
+  genus_levels <- c(
+    setdiff(
+      names(palette),
+      "Other"
+    ),
     "Other"
   )
 
   plot_data$Genus <- factor(
     plot_data$Genus,
-    levels = genus_order
+    levels = genus_levels
   )
 
-  palette <- c(
-    stats::setNames(
-      genus_rank_colors,
-      genus_order[
-        genus_order != "Other"
-      ]
-    ),
-    "Other" = "#A6CEE3"
+  plot_data$Season <- factor(
+    plot_data$Season,
+    levels = season_order
   )
 
-  ggplot(
+  ggplot2::ggplot(
     plot_data,
-    aes(
+    ggplot2::aes(
       x = Season,
       y = RelativeAbundance,
       fill = Genus
     )
   ) +
-    geom_col(
-      width = 0.7,
-      color = NA
+    ggplot2::geom_col(
+      width = 0.65
     ) +
-    scale_fill_manual(
+    ggplot2::scale_fill_manual(
       values = palette,
-      breaks = rev(genus_order)
+      breaks = rev(genus_levels),
+      drop = FALSE
     ) +
-    scale_y_continuous(
+    ggplot2::scale_y_continuous(
       labels = scales::percent_format(
         accuracy = 1
       ),
       limits = c(0, 1),
       expand = c(0, 0)
     ) +
-    labs(
+    ggplot2::labs(
       x = NULL,
       y = "Relative abundance",
       fill = "Genus"
     ) +
-    theme_composition() +
-    theme(
-      legend.text = element_text(
+    composition_theme() +
+    ggplot2::theme(
+      legend.text = ggplot2::element_text(
         face = "italic",
-        size = 11
+        size = 10
       ),
-      legend.position = "right",
-      axis.text.x = element_text(
+      axis.text.x = ggplot2::element_text(
         face = "bold",
         color = "black"
       )
@@ -818,156 +912,85 @@ make_figure5_panel <- function(
 }
 
 # ------------------------------------------------------------
-# 14. Figure 5A — Aoudad
+# 22. Figure 5A: Aoudad
 # ------------------------------------------------------------
 
-aoudad_spring <- make_figure5_panel(
-  "Aoudad",
-  "Spring"
+p_aoudad <- make_host_figure(
+  "Aoudad"
 )
-
-aoudad_winter <- make_figure5_panel(
-  "Aoudad",
-  "Winter"
-)
-
-figure5_aoudad <- (
-  aoudad_spring +
-    aoudad_winter
-) +
-  patchwork::plot_layout(
-    ncol = 2
-  ) +
-  patchwork::plot_annotation(
-    title = "Aoudad",
-    tag_levels = "A"
-  )
 
 # ------------------------------------------------------------
-# 15. Figure 5B — Desert bighorn sheep
+# 23. Figure 5B: Desert bighorn sheep
 # ------------------------------------------------------------
 
-bighorn_spring <- make_figure5_panel(
-  "Desert bighorn sheep",
-  "Spring"
+p_bighorn <- make_host_figure(
+  "Desert bighorn sheep"
 )
-
-bighorn_winter <- make_figure5_panel(
-  "Desert bighorn sheep",
-  "Winter"
-)
-
-figure5_bighorn <- (
-  bighorn_spring +
-    bighorn_winter
-) +
-  patchwork::plot_layout(
-    ncol = 2
-  ) +
-  patchwork::plot_annotation(
-    title = "Desert bighorn sheep"
-  )
 
 # ------------------------------------------------------------
-# 16. Figure 5C — Mule deer
+# 24. Figure 5C: Mule deer
 # ------------------------------------------------------------
 
-mule_spring <- make_figure5_panel(
-  "Mule deer",
-  "Spring"
+p_mule <- make_host_figure(
+  "Mule deer"
 )
-
-mule_winter <- make_figure5_panel(
-  "Mule deer",
-  "Winter"
-)
-
-figure5_mule <- (
-  mule_spring +
-    mule_winter
-) +
-  patchwork::plot_layout(
-    ncol = 2
-  ) +
-  patchwork::plot_annotation(
-    title = "Mule deer"
-  )
 
 # ------------------------------------------------------------
-# 17. Combine Figure 5
+# 25. Export individual Figure 5 panels
+# ------------------------------------------------------------
+
+save_figure(
+  p_aoudad,
+  "Figure_5A_aoudad.png",
+  width = 12,
+  height = 6
+)
+
+save_figure(
+  p_bighorn,
+  "Figure_5B_desert_bighorn_sheep.png",
+  width = 12,
+  height = 6
+)
+
+save_figure(
+  p_mule,
+  "Figure_5C_mule_deer.png",
+  width = 12,
+  height = 6
+)
+
+# ------------------------------------------------------------
+# 26. Combine and export Figure 5
 # ------------------------------------------------------------
 
 figure5 <- (
-  (aoudad_spring | aoudad_winter) /
-    (bighorn_spring | bighorn_winter) /
-    (mule_spring | mule_winter)
+  p_aoudad /
+    p_bighorn /
+    p_mule
 ) +
-  patchwork::plot_layout(
-    heights = c(1, 1, 1)
+  patchwork::plot_annotation(
+    tag_levels = "A"
   )
 
 save_figure(
   figure5,
-  "Figure_5_genus_composition.png",
-  width = 18,
-  height = 20
+  "Figure_5_seasonal_genus_composition.png",
+  width = 15,
+  height = 19
 )
 
 # ------------------------------------------------------------
-# 18. Export individual Figure 5 panels
-# ------------------------------------------------------------
-
-save_figure(
-  aoudad_spring,
-  "Figure_5A_aoudad_spring.png",
-  width = 9,
-  height = 6
-)
-
-save_figure(
-  aoudad_winter,
-  "Figure_5A_aoudad_winter.png",
-  width = 9,
-  height = 6
-)
-
-save_figure(
-  bighorn_spring,
-  "Figure_5B_bighorn_spring.png",
-  width = 9,
-  height = 6
-)
-
-save_figure(
-  bighorn_winter,
-  "Figure_5B_bighorn_winter.png",
-  width = 9,
-  height = 6
-)
-
-save_figure(
-  mule_spring,
-  "Figure_5C_mule_deer_spring.png",
-  width = 9,
-  height = 6
-)
-
-save_figure(
-  mule_winter,
-  "Figure_5C_mule_deer_winter.png",
-  width = 9,
-  height = 6
-)
-
-# ------------------------------------------------------------
-# 19. Save objects
+# 27. Save analysis objects
 # ------------------------------------------------------------
 
 saveRDS(
   list(
-    functional = functional_summary,
-    family = family_summary,
-    genus = figure5_data,
+    functional_summary = functional_summary,
+    family_summary = family_summary,
+    family_selection = family_selection_table,
+    genus_summary = figure5_data,
+    top_genera = top_genera_table,
     figure4 = figure4,
     figure5 = figure5
   ),
@@ -975,16 +998,19 @@ saveRDS(
 )
 
 # ------------------------------------------------------------
-# 20. Completion
+# 28. Completion
 # ------------------------------------------------------------
 
 cat(
   "\n========================================\n",
-  "Composition analysis completed\n",
+  "Dietary composition analysis completed\n",
   "Figure 4: Functional groups and families\n",
   "Figure 5: Seasonal genus composition\n",
-  "Resolution: 600 DPI\n",
-  "Background: White\n",
+  "Family selection: Overall mean >= 2%\n",
+  "Genus selection: Top 10 per host-season\n",
+  "No predetermined plant genera or families\n",
+  "Figures: PNG, 600 DPI, white background\n",
   "========================================\n",
   sep = ""
 )
+
