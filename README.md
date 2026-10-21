@@ -1,2 +1,18 @@
 # ungulate-diet-metagenomics
-This repository contains bioinformatics and R scripts used for metagenomic dietary analyses of sympatric ungulates. Reference genomes, sequencing data, sample-specific metadata, and configuration files are not included. Users must provide the required inputs and adjust file paths before running the scripts. The scripts are provided as a reconstructed workflow and have not yet been fully validated against the published results.
+This repository contains R scripts and bioinformatics workflows developed for shotgun metagenomic analyses of dietary composition, diversity, and niche overlap among three sympatric ungulate species in the Van Horn Mountains of Trans-Pecos Texas. Raw sequencing data are deposited in NCBI SRA under BioProject PRJNA1353588. The repository contains scripts for:
+
+Data import, taxonomic curation, and preprocessing
+
+Genus accumulation and rarefaction analyses
+
+Alpha diversity and statistical comparisons
+
+Dietary niche overlap using Pianka's index
+
+Plant functional group and taxonomic composition
+
+Beta diversity, PERMANOVA, and NMDS ordination
+
+Differential abundance analysis using ANCOM-BC2
+
+Genus-level overlap visualized using Venn diagrams
